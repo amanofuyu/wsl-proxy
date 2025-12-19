@@ -1,5 +1,8 @@
 import { execSync } from 'node:child_process'
+import fs from 'node:fs'
+import https from 'node:https'
 import os from 'node:os'
+import path from 'node:path'
 import process from 'node:process'
 import cors from 'cors'
 import dotenv from 'dotenv'
@@ -8,9 +11,10 @@ import { createProxyMiddleware } from 'http-proxy-middleware'
 
 dotenv.config()
 
+// ================= 参数解析区 =================
 const args = process.argv.slice(2)
 
-function getArgValue<T>(flags: string[], defaultValue: T) {
+function getArgValue(flags: string[], defaultValue: number): number {
   const index = args.findIndex(arg => flags.includes(arg))
 
   if (index !== -1 && args[index + 1]) {
@@ -22,9 +26,30 @@ function getArgValue<T>(flags: string[], defaultValue: T) {
 }
 
 const LOCAL_PORT = getArgValue(['--port', '-p'], 8001)
-
+const LOCAL_HTTPS_PORT = getArgValue(['--https-port', '-sp'], 8400 + LOCAL_PORT % 100)
 const WSL_PORT = getArgValue(['--target', '-t'], 8080)
 
+// ================= 证书加载区 =================
+let sslOptions: { key: ReturnType<typeof fs.readFileSync>, cert: ReturnType<typeof fs.readFileSync> } | null = null
+try {
+  const keyPath = path.join(__dirname, '../key.pem')
+  const certPath = path.join(__dirname, '../cert.pem')
+  if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+    sslOptions = {
+      key: fs.readFileSync(keyPath),
+      cert: fs.readFileSync(certPath),
+    }
+    console.log('🔐 发现证书文件，HTTPS 模式将开启')
+  }
+  else {
+    console.log('⚠️ 未找到 key.pem 或 cert.pem，仅开启 HTTP 模式')
+  }
+}
+catch (e) {
+  console.error('证书加载失败:', (e as Error).message)
+}
+
+// ================= WSL IP 获取区 =================
 let WSL_IP = ''
 
 try {
@@ -44,6 +69,7 @@ catch (e) {
   process.exit(1)
 }
 
+// ================= 服务器启动区 =================
 const app = express()
 
 // 中间件
@@ -55,16 +81,29 @@ app.use('/', createProxyMiddleware({
   target: `http://${WSL_IP}:${WSL_PORT}`,
   changeOrigin: false,
   ws: true,
+  secure: false,
 }))
+
+const LOCAL_IP = getLocalIP()
 
 // 启动服务器
 app.listen(LOCAL_PORT, '0.0.0.0', () => {
   console.log(`🚀 转发服务已启动！`)
-  console.log(`🔗 外部访问地址: http://${getLocalIP()}:${LOCAL_PORT}`)
+  console.log(`🔗 外部访问地址: http://${LOCAL_IP}:${LOCAL_PORT}`)
   console.log(`🔗 转发目标: http://${WSL_IP}:${WSL_PORT}`)
 })
 
-function getLocalIP() {
+if (sslOptions) {
+  const httpsServer = https.createServer(sslOptions, app)
+
+  httpsServer.listen(LOCAL_HTTPS_PORT, '0.0.0.0', () => {
+    console.log(`🚀 HTTPS 服务已启动！`)
+    console.log(`🔗 外部访问地址: https://${LOCAL_IP}:${LOCAL_HTTPS_PORT}`)
+    console.log(`🔗 转发目标: https://${WSL_IP}:${WSL_PORT}`)
+  })
+}
+
+function getLocalIP(): string {
   const interfaces = os.networkInterfaces()
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name] || []) {
